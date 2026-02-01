@@ -1,28 +1,26 @@
 const roomInput = document.getElementById("roomInput");
-const startBroadcastButton = document.getElementById("startBroadcast");
-const joinReceiverButton = document.getElementById("joinReceiver");
+const joinButton = document.getElementById("joinRoom");
 const localVideo = document.getElementById("localVideo");
 const remoteVideo = document.getElementById("remoteVideo");
-const logEl = document.getElementById("log");
+const statusEl = document.getElementById("status");
 const roomLink = document.getElementById("roomLink");
 
 const state = {
   ws: null,
-  role: null,
   room: null,
   clientId: null,
+  sessionId: null,
+  peerId: null,
   localStream: null,
-  peerConnections: new Map(),
-  pendingCandidates: new Map(),
+  pc: null,
 };
 
 const rtcConfig = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
 
-function log(message) {
-  const time = new Date().toLocaleTimeString();
-  logEl.textContent = `[${time}] ${message}\n` + logEl.textContent;
+function setStatus(message) {
+  statusEl.textContent = message;
 }
 
 function wsUrl() {
@@ -40,6 +38,17 @@ function setRoomLink(room) {
   roomLink.textContent = `Room link: ${url.toString()}`;
 }
 
+function getSessionId() {
+  const stored = localStorage.getItem("sessionId");
+  if (stored) return stored;
+  const generated =
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2) + Date.now().toString(36);
+  localStorage.setItem("sessionId", generated);
+  return generated;
+}
+
 async function ensureLocalStream() {
   if (state.localStream) return state.localStream;
   state.localStream = await navigator.mediaDevices.getUserMedia({
@@ -50,28 +59,28 @@ async function ensureLocalStream() {
   return state.localStream;
 }
 
-function connectAndJoin(role) {
-  state.role = role;
+function connectAndJoin() {
   state.room = roomInput.value.trim() || randomRoom();
   roomInput.value = state.room;
   setRoomLink(state.room);
+  state.sessionId = getSessionId();
 
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-    send({ type: "join", room: state.room, role: state.role });
+    send({ type: "join", room: state.room, sessionId: state.sessionId });
     return;
   }
 
   state.ws = new WebSocket(wsUrl());
   state.ws.onopen = () => {
-    log("connected to signaling server");
-    send({ type: "join", room: state.room, role: state.role });
+    setStatus("Connected. Joining room...");
+    send({ type: "join", room: state.room, sessionId: state.sessionId });
   };
   state.ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     handleSignal(msg);
   };
   state.ws.onclose = () => {
-    log("disconnected from signaling server");
+    setStatus("Disconnected from server.");
   };
 }
 
@@ -84,136 +93,114 @@ function handleSignal(msg) {
   switch (msg.type) {
     case "joined":
       state.clientId = msg.clientId;
-      log(`joined room ${msg.room} as ${msg.role}`);
+      setStatus("Joined room. Waiting for someone to join...");
       break;
-    case "receiver-joined":
-      if (state.role === "broadcaster") {
-        handleReceiverJoined(msg.clientId);
-      }
+    case "waiting":
+      setStatus("Waiting for someone to join...");
+      break;
+    case "peer-joined":
+      state.peerId = msg.clientId;
+      setStatus("Peer connected.");
+      handlePeerJoined(msg.offerer);
+      break;
+    case "peer-left":
+      setStatus("Peer left. Waiting for someone to join...");
+      cleanupPeer();
       break;
     case "offer":
-      if (state.role === "receiver") {
-        handleOffer(msg.fromId, msg.sdp);
-      }
+      handleOffer(msg.fromId, msg.sdp);
       break;
     case "answer":
-      if (state.role === "broadcaster") {
-        handleAnswer(msg.fromId, msg.sdp);
-      }
+      handleAnswer(msg.fromId, msg.sdp);
       break;
     case "ice":
       handleRemoteIce(msg.fromId, msg.candidate);
       break;
-    case "broadcaster-left":
-      log("broadcaster disconnected");
-      remoteVideo.srcObject = null;
-      break;
-    case "receiver-left":
-      if (state.role === "broadcaster") {
-        closePeer(msg.clientId);
-        log(`receiver left: ${msg.clientId}`);
-      }
-      break;
     case "error":
-      log(`error: ${msg.error}`);
+      setStatus(`Error: ${msg.error}`);
       break;
     default:
       break;
   }
 }
 
-function createPeerConnection(remoteId) {
+async function handlePeerJoined(offerer) {
+  await ensureLocalStream();
+  createPeerConnection();
+  if (offerer) {
+    const offer = await state.pc.createOffer();
+    await state.pc.setLocalDescription(offer);
+    send({ type: "offer", targetId: state.peerId, sdp: offer.sdp });
+  }
+}
+
+function createPeerConnection() {
+  cleanupPeer();
   const pc = new RTCPeerConnection(rtcConfig);
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       send({
         type: "ice",
-        targetId: remoteId,
+        targetId: state.peerId,
         candidate: event.candidate,
       });
     }
   };
 
+  pc.ontrack = (event) => {
+    remoteVideo.srcObject = event.streams[0];
+  };
+
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-      closePeer(remoteId);
+      cleanupPeer();
+      setStatus("Connection ended. Waiting for someone to join...");
     }
   };
 
-  if (state.role === "receiver") {
-    pc.ontrack = (event) => {
-      remoteVideo.srcObject = event.streams[0];
-    };
+  state.localStream.getTracks().forEach((track) => {
+    pc.addTrack(track, state.localStream);
+  });
+
+  state.pc = pc;
+}
+
+function cleanupPeer() {
+  if (state.pc) {
+    state.pc.close();
+    state.pc = null;
   }
-
-  state.peerConnections.set(remoteId, pc);
-  flushPending(remoteId, pc);
-  return pc;
-}
-
-function closePeer(remoteId) {
-  const pc = state.peerConnections.get(remoteId);
-  if (pc) {
-    pc.close();
-    state.peerConnections.delete(remoteId);
-  }
-}
-
-function addPending(remoteId, candidate) {
-  if (!state.pendingCandidates.has(remoteId)) {
-    state.pendingCandidates.set(remoteId, []);
-  }
-  state.pendingCandidates.get(remoteId).push(candidate);
-}
-
-function flushPending(remoteId, pc) {
-  const queued = state.pendingCandidates.get(remoteId);
-  if (!queued || queued.length === 0) return;
-  queued.forEach((candidate) => pc.addIceCandidate(candidate).catch(() => {}));
-  state.pendingCandidates.delete(remoteId);
-}
-
-async function handleReceiverJoined(receiverId) {
-  const stream = await ensureLocalStream();
-  const pc = createPeerConnection(receiverId);
-  stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  send({ type: "offer", targetId: receiverId, sdp: offer.sdp });
+  remoteVideo.srcObject = null;
+  state.peerId = null;
 }
 
 async function handleOffer(fromId, sdp) {
-  const pc = createPeerConnection(fromId);
-  await pc.setRemoteDescription({ type: "offer", sdp });
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
+  state.peerId = fromId;
+  await ensureLocalStream();
+  if (!state.pc) {
+    createPeerConnection();
+  }
+  await state.pc.setRemoteDescription({ type: "offer", sdp });
+  const answer = await state.pc.createAnswer();
+  await state.pc.setLocalDescription(answer);
   send({ type: "answer", targetId: fromId, sdp: answer.sdp });
 }
 
 async function handleAnswer(fromId, sdp) {
-  const pc = state.peerConnections.get(fromId);
-  if (!pc) return;
-  await pc.setRemoteDescription({ type: "answer", sdp });
+  if (!state.pc) return;
+  await state.pc.setRemoteDescription({ type: "answer", sdp });
 }
 
 function handleRemoteIce(fromId, candidate) {
-  if (!candidate) return;
-  const pc = state.peerConnections.get(fromId);
-  if (pc) {
-    pc.addIceCandidate(candidate).catch(() => {});
-  } else {
-    addPending(fromId, candidate);
-  }
+  if (!candidate || !state.pc) return;
+  state.pc.addIceCandidate(candidate).catch(() => {});
 }
 
-startBroadcastButton.addEventListener("click", async () => {
+joinButton.addEventListener("click", async () => {
+  setStatus("Requesting camera/mic...");
   await ensureLocalStream();
-  connectAndJoin("broadcaster");
-});
-
-joinReceiverButton.addEventListener("click", () => {
-  connectAndJoin("receiver");
+  connectAndJoin();
 });
 
 const queryRoom = new URLSearchParams(location.search).get("room");
