@@ -1,0 +1,10 @@
+Final Application:
+  Create peer to peer video chat application, with server running on a phone.
+
+Version 1:
+- create a server (using golang) to run on phone using webRTC which allows one user to broadcast their video and followers to join an receive the video feed
+Main features:
+- golang server running on phone
+- user1 joins as broadcaster and starts video feed
+- user2 join as receiver and starts receiving video feed
+- real time streaming with minimal buffering on phone server.

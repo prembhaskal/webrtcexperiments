@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Peer to Peer Video V1</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 24px;
+        max-width: 900px;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      input[type="text"] {
+        padding: 8px;
+        min-width: 220px;
+      }
+      button {
+        padding: 8px 12px;
+      }
+      .videos {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 16px;
+        margin-top: 16px;
+      }
+      video {
+        width: 100%;
+        background: #111;
+        border-radius: 8px;
+      }
+      #log {
+        margin-top: 16px;
+        background: #f3f3f3;
+        padding: 12px;
+        border-radius: 8px;
+        min-height: 80px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Peer to Peer Video V1</h1>
+    <div class="controls">
+      <label>
+        Room:
+        <input id="roomInput" type="text" placeholder="room name" />
+      </label>
+      <button id="startBroadcast">Start broadcast</button>
+      <button id="joinReceiver">Join as receiver</button>
+    </div>
+    <div id="roomLink"></div>
+    <div class="videos">
+      <div>
+        <h3>Local</h3>
+        <video id="localVideo" autoplay muted playsinline></video>
+      </div>
+      <div>
+        <h3>Remote</h3>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+    </div>
+    <div id="log"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
