@@ -45,9 +45,10 @@ http://<PHONE_IP>:10011
 ```
 
 ## Usage
-1. Click **Start broadcast** on the broadcaster device.
-2. Copy the room link and open it in another browser.
-3. Click **Join as receiver** to start receiving the video.
+1. Enter a room name and click **Join**.
+2. Share the room link with another phone.
+3. When the other phone joins, both sides send and receive video.
+4. If you are alone in the room, the status shows “Waiting for someone to join...”.
 
 ## Notes
 - The signaling server only relays WebRTC offers/answers/ICE.

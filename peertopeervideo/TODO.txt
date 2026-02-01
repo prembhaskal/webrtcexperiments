@@ -8,3 +8,8 @@ Main features:
 - user1 joins as broadcaster and starts video feed
 - user2 join as receiver and starts receiving video feed
 - real time streaming with minimal buffering on phone server.
+
+Future enhancements:
+- mute/unmute toggle
+- switch camera (front/back)
+- speaker mode toggle

@@ -10,38 +10,38 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
-)
-
-const (
-	roleBroadcaster = "broadcaster"
-	roleReceiver    = "receiver"
 )
 
 type SignalMessage struct {
 	Type      string          `json:"type"`
 	Room      string          `json:"room,omitempty"`
-	Role      string          `json:"role,omitempty"`
+	SessionID string          `json:"sessionId,omitempty"`
 	ClientID  string          `json:"clientId,omitempty"`
 	FromID    string          `json:"fromId,omitempty"`
 	TargetID  string          `json:"targetId,omitempty"`
 	SDP       string          `json:"sdp,omitempty"`
 	Candidate json.RawMessage `json:"candidate,omitempty"`
+	Offerer   bool            `json:"offerer,omitempty"`
+	Status    string          `json:"status,omitempty"`
 	Error     string          `json:"error,omitempty"`
 }
 
 type Client struct {
-	id   string
-	role string
-	room string
-	conn *websocket.Conn
-	send chan SignalMessage
+	id               string
+	sessionID        string
+	room             string
+	conn             *websocket.Conn
+	send             chan SignalMessage
+	disconnectedAt   time.Time
+	disconnectTimer  *time.Timer
 }
 
 type Room struct {
-	broadcaster *Client
-	receivers   map[string]*Client
+	peers    map[string]*Client
+	sessions map[string]*Client
 }
 
 type Hub struct {
@@ -59,45 +59,12 @@ func (h *Hub) getOrCreateRoom(id string) *Room {
 	room := h.rooms[id]
 	if room == nil {
 		room = &Room{
-			receivers: make(map[string]*Client),
+			peers:    make(map[string]*Client),
+			sessions: make(map[string]*Client),
 		}
 		h.rooms[id] = room
 	}
 	return room
-}
-
-func (h *Hub) removeClient(c *Client) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	room := h.rooms[c.room]
-	if room == nil {
-		return
-	}
-
-	switch c.role {
-	case roleBroadcaster:
-		if room.broadcaster == c {
-			room.broadcaster = nil
-			for _, receiver := range room.receivers {
-				receiver.sendMessage(SignalMessage{Type: "broadcaster-left"})
-			}
-		}
-	case roleReceiver:
-		if room.receivers != nil {
-			delete(room.receivers, c.id)
-			if room.broadcaster != nil {
-				room.broadcaster.sendMessage(SignalMessage{
-					Type:     "receiver-left",
-					ClientID: c.id,
-				})
-			}
-		}
-	}
-
-	if room.broadcaster == nil && len(room.receivers) == 0 {
-		delete(h.rooms, c.room)
-	}
 }
 
 func (h *Hub) handleJoin(c *Client, msg SignalMessage) {
@@ -105,8 +72,8 @@ func (h *Hub) handleJoin(c *Client, msg SignalMessage) {
 		c.sendMessage(SignalMessage{Type: "error", Error: "room is required"})
 		return
 	}
-	if msg.Role != roleBroadcaster && msg.Role != roleReceiver {
-		c.sendMessage(SignalMessage{Type: "error", Error: "role must be broadcaster or receiver"})
+	if msg.SessionID == "" {
+		c.sendMessage(SignalMessage{Type: "error", Error: "sessionId is required"})
 		return
 	}
 
@@ -114,41 +81,67 @@ func (h *Hub) handleJoin(c *Client, msg SignalMessage) {
 	defer h.mu.Unlock()
 
 	room := h.getOrCreateRoom(msg.Room)
-	switch msg.Role {
-	case roleBroadcaster:
-		if room.broadcaster != nil {
-			c.sendMessage(SignalMessage{Type: "error", Error: "broadcaster already exists"})
-			return
+
+	if existing := room.sessions[msg.SessionID]; existing != nil {
+		if existing.disconnectTimer != nil {
+			existing.disconnectTimer.Stop()
 		}
-		room.broadcaster = c
-	case roleReceiver:
-		room.receivers[c.id] = c
+		delete(room.peers, existing.id)
+		delete(room.sessions, existing.sessionID)
+	}
+
+	connectedCount := 0
+	for _, peer := range room.peers {
+		if peer.disconnectedAt.IsZero() {
+			connectedCount++
+		}
+	}
+
+	if connectedCount >= 2 {
+		c.sendMessage(SignalMessage{Type: "error", Error: "room full"})
+		return
+	}
+
+	if connectedCount < 2 && len(room.peers) >= 2 {
+		for id, peer := range room.peers {
+			if !peer.disconnectedAt.IsZero() {
+				if peer.disconnectTimer != nil {
+					peer.disconnectTimer.Stop()
+				}
+				delete(room.peers, id)
+				delete(room.sessions, peer.sessionID)
+				break
+			}
+		}
 	}
 
 	c.room = msg.Room
-	c.role = msg.Role
+	c.sessionID = msg.SessionID
 	c.sendMessage(SignalMessage{
 		Type:     "joined",
 		Room:     c.room,
-		Role:     c.role,
 		ClientID: c.id,
 	})
 
-	if c.role == roleBroadcaster {
-		for _, receiver := range room.receivers {
-			c.sendMessage(SignalMessage{
-				Type:     "receiver-joined",
-				ClientID: receiver.id,
-			})
-		}
+	room.peers[c.id] = c
+	room.sessions[c.sessionID] = c
+
+	other := room.otherConnectedPeer(c.id)
+	if other == nil {
+		c.sendMessage(SignalMessage{Type: "waiting", Status: "waiting"})
+		return
 	}
 
-	if c.role == roleReceiver && room.broadcaster != nil {
-		room.broadcaster.sendMessage(SignalMessage{
-			Type:     "receiver-joined",
-			ClientID: c.id,
-		})
-	}
+	other.sendMessage(SignalMessage{
+		Type:     "peer-joined",
+		ClientID: c.id,
+		Offerer:  false,
+	})
+	c.sendMessage(SignalMessage{
+		Type:     "peer-joined",
+		ClientID: other.id,
+		Offerer:  true,
+	})
 }
 
 func (h *Hub) relay(c *Client, msg SignalMessage) {
@@ -161,24 +154,16 @@ func (h *Hub) relay(c *Client, msg SignalMessage) {
 
 	msg.FromID = c.id
 
-	switch c.role {
-	case roleBroadcaster:
-		if msg.TargetID == "" {
-			return
+	if msg.TargetID == "" {
+		if other := room.otherConnectedPeer(c.id); other != nil {
+			msg.TargetID = other.id
 		}
-		if receiver := room.receivers[msg.TargetID]; receiver != nil {
-			receiver.sendMessage(msg)
-		}
-	case roleReceiver:
-		if room.broadcaster == nil {
-			return
-		}
-		if msg.TargetID == "" {
-			msg.TargetID = room.broadcaster.id
-		}
-		if msg.TargetID == room.broadcaster.id {
-			room.broadcaster.sendMessage(msg)
-		}
+	}
+	if msg.TargetID == "" {
+		return
+	}
+	if peer := room.peers[msg.TargetID]; peer != nil {
+		peer.sendMessage(msg)
 	}
 }
 
@@ -222,7 +207,7 @@ func (c *Client) writeLoop() {
 
 func (c *Client) readLoop(h *Hub) {
 	defer func() {
-		h.removeClient(c)
+		h.handleDisconnect(c)
 		close(c.send)
 	}()
 
@@ -232,7 +217,7 @@ func (c *Client) readLoop(h *Hub) {
 			return
 		}
 
-		if c.role == "" {
+		if c.room == "" {
 			if msg.Type != "join" {
 				c.sendMessage(SignalMessage{Type: "error", Error: "must join first"})
 				continue
@@ -254,6 +239,72 @@ func randomID() string {
 		return "unknown"
 	}
 	return hex.EncodeToString(buf)
+}
+
+func (h *Hub) handleDisconnect(c *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room := h.rooms[c.room]
+	if room == nil {
+		return
+	}
+
+	peer, ok := room.peers[c.id]
+	if !ok || peer != c {
+		return
+	}
+
+	c.disconnectedAt = time.Now()
+	if c.disconnectTimer != nil {
+		c.disconnectTimer.Stop()
+	}
+
+	if other := room.otherConnectedPeer(c.id); other != nil {
+		other.sendMessage(SignalMessage{Type: "peer-left", ClientID: c.id})
+		other.sendMessage(SignalMessage{Type: "waiting", Status: "waiting"})
+	}
+
+	c.disconnectTimer = time.AfterFunc(5*time.Second, func() {
+		h.finalizeDisconnect(c.room, c.id, c.sessionID)
+	})
+}
+
+func (h *Hub) finalizeDisconnect(roomID, clientID, sessionID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room := h.rooms[roomID]
+	if room == nil {
+		return
+	}
+
+	peer := room.peers[clientID]
+	if peer == nil || peer.sessionID != sessionID {
+		return
+	}
+	if peer.disconnectedAt.IsZero() {
+		return
+	}
+
+	delete(room.peers, clientID)
+	delete(room.sessions, sessionID)
+
+	if len(room.peers) == 0 {
+		delete(h.rooms, roomID)
+	}
+}
+
+func (r *Room) otherConnectedPeer(excludeID string) *Client {
+	for id, peer := range r.peers {
+		if id == excludeID {
+			continue
+		}
+		if peer.disconnectedAt.IsZero() {
+			return peer
+		}
+	}
+	return nil
 }
 
 //go:embed web/*
