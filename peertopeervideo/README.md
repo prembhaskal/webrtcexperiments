@@ -13,9 +13,25 @@ pkg update
 pkg install openssh
 ```
 
-## Build on laptop (recommended)
+## Development (Non-Android)
+
+You can also run the server on your local machine (e.g. Linux, macOS).
+
+### Build
+Build the server binary:
 ```sh
-cd peertopeervideo
+make build
+```
+
+### Run
+Run the startup script:
+```sh
+./start_server.sh
+```
+The server will be running at `http://localhost:10011`.
+
+## Build for Android
+```sh
 make build-android
 ```
 
@@ -33,7 +49,7 @@ scp start_server.sh <PHONE_USER>@<PHONE_IP>:/data/data/com.termux/files/home/
 ```sh
 chmod +x /data/data/com.termux/files/home/peertopeervideo-server-android
 chmod +x /data/data/com.termux/files/home/start_server.sh
-/data/data/com.termux/files/home/start_server.sh
+/data/data/com.termux/files/home/start_server.sh android
 ```
 
 The server listens on `:10011` and serves the embedded web client.

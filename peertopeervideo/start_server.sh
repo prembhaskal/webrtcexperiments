@@ -2,14 +2,25 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-BIN_NAME="peertopeervideo-server-android"
-BIN_PATH="${ROOT_DIR}/${BIN_NAME}"
+if [ "${1:-}" = "android" ]; then
+  BIN_NAME="peertopeervideo-server-android"
+  BUILD_CMD="make build-android"
+else
+  BIN_NAME="peertopeervideo-server"
+  BUILD_CMD="make build"
+fi
+
+if [ -d "${ROOT_DIR}/bin" ]; then
+  BIN_PATH="${ROOT_DIR}/bin/${BIN_NAME}"
+else
+  BIN_PATH="${ROOT_DIR}/${BIN_NAME}"
+fi
 CERT_FILE="${ROOT_DIR}/server.crt"
 KEY_FILE="${ROOT_DIR}/server.key"
 
 if [ ! -x "${BIN_PATH}" ]; then
   echo "Binary not found or not executable: ${BIN_PATH}"
-  echo "Build with: make build-android"
+  echo "Build with: ${BUILD_CMD}"
   exit 1
 fi
 
@@ -46,4 +57,6 @@ fi
 
 echo "Starting server, logging to ${LOG_FILE}"
 nohup "${BIN_PATH}" >> "${LOG_FILE}" 2>&1 &
-echo "PID: $!"
+pid=$!
+echo "PID: ${pid}"
+echo "[$(date)] PID: ${pid}" >> "${LOG_FILE}"
